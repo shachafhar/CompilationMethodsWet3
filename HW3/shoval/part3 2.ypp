@@ -1,0 +1,1153 @@
+%{
+	/* C user declarations */
+	#include <iostream>
+	#include "part3_helper.hpp"
+	#define LEX_ERR 1
+	#define SYN_ERR 2
+	#define SEM_ERR 3
+	#define OP_ERR 9
+	
+	using namespace std;
+	extern "C" int yylex();	
+	extern int yylex();	
+	extern void yylex_destroy();
+	extern char* yytext;
+	extern int yylineno;
+	void yyerror(const char* c);
+	void print_sem_error(string err_msg);
+	void print_op_error(string err_msg);
+
+%}
+
+	/* Token Declarations */
+	%token tk_int tk_float tk_void
+	%token tk_write
+	%token tk_read
+	%token tk_optional
+	%token tk_while
+	%token tk_do
+	%token tk_return
+	%token tk_id
+	%token tk_integernum
+	%token tk_realnum
+	%token tk_str
+	%right tk_assign
+	%right tk_if tk_then tk_else
+	%left tk_or
+	%left tk_and
+	%left tk_relop
+	%left tk_addop
+	%left tk_mulop
+	%right tk_not
+	%left '('
+	%left ')'
+	%left '{'
+	%left '}'
+	%left ','
+	%left ':'
+	%left ';'
+	
+%%
+	/* Rules */	
+	PROGRAM : FDEFS
+		{
+			// Backpatch the addresses of the functions in the code
+			for(map<string, Function>::iterator it = function_table.begin(); it != function_table.end(); it++) 
+			{
+				buffer->backpatch(it->second.call_addrs, it->second.start_addr);
+			}
+		}
+	;
+
+	FDEFS : FDEFS FUNC_DEF_API M BLK 
+		{
+			// This rule represents the end of function implementation
+			
+			//Check if the function has been defined
+			if(function_table[$2.name].is_defined)
+			{
+				print_sem_error("Function '" + $2.name + "' has already been defined");
+			}
+			else
+			{
+				function_table[$2.name].is_defined = true;
+				buffer->emit("RETRN");
+			}
+			
+			// Reset vars at the end of a function
+			symbol_table.clear();
+			$2.req_params_type_lst.clear();
+			$2.opt_params_type_lst.clear();
+			int_regs_num = 3;
+			float_regs_num = 0;
+			curr_mem_offset = 0;
+				
+		}
+			| FDEFS FUNC_DEC_API 
+		{
+			// This rule represents the end of function decleration
+			
+			// The function was declared but not defined, so the start address is empty
+			if(!function_table[$2.name].is_defined)
+			{
+				function_table[$2.name].start_addr = -1;
+			}
+			symbol_table.clear();
+		}
+			| /* epsilon */
+		{}
+	;
+
+	FUNC_DEC_API : TYPE tk_id '(' ')' ';' 
+		{
+			if(function_table.find($2.name) != function_table.end())
+			{
+				// The function is in the function table
+				
+				// Check the return type
+				if($1.type != function_table[$2.name].return_type)
+				{
+					print_sem_error("Return type of function '" + $2.name + "' does not match");
+				}
+				
+				// Check that the number of parameters is 0
+				if((function_table[$2.name].req_params_type.size() != 0) || (function_table[$2.name].opt_params_type.size() != 0))
+				{
+					print_sem_error("Number of parameters of function '" + $2.name + "' does not match");
+				}
+			}
+			else
+			{
+				// If the function is main, check the return type
+				if($2.name == "main" && $1.type != t_void)
+				{
+					print_sem_error("Return type of main function is not void");
+				}
+				
+				// Insert the function to the function table
+				Function func;
+				func.return_type = $1.type;
+				func.is_defined = false;
+				function_table.insert({$2.name, func});
+			}
+			return_type = $1.type;
+			$$.type = $1.type;
+			$$.name = $2.name;
+			
+		}
+			| TYPE tk_id '(' M FUNC_ARGLIST ')' ';'
+		{
+			// Args list of main function must be empty
+			if($2.name == "main")
+			{
+				print_sem_error("Args list of main function must be empty");
+			}
+			
+			if(function_table.find($2.name) != function_table.end())
+			{
+				// The function is in the function table
+				
+				// Check the return type
+				if($1.type != function_table[$2.name].return_type)
+				{
+					print_sem_error("Return type of function '" + $2.name + "' does not match");
+				}
+				
+				// Check the number of parameters
+				if((function_table[$2.name].req_params_type.size() != $5.req_params_type_lst.size()) || (function_table[$2.name].opt_params_type.size() != 0))
+				{
+					print_sem_error("Number of parameters of function '" + $2.name + "' does not match");
+				}
+				
+				// Check the parameters types
+				int num_of_params = function_table[$2.name].req_params_type.size()
+				for(int i = 0; i < num_of_params; i++)
+				{
+					if(function_table[$2.name].req_params_type[i] != $5.req_params_type_lst[i])
+					{
+						print_sem_error("Type of parameters of function '" + $2.name + "' does not match");
+					}
+				}
+			}
+			else
+			{
+				// Insert the function to the function table
+				Function func;
+				func.return_type = $1.type;
+				func.is_defined = false;
+				func.req_params_type = $5.req_params_type_lst;
+				function_table.insert({$2.name, func});
+			}
+			return_type = $1.type;
+			$$.type = $1.type;
+			$$.name = $2.name;
+			$$.req_params_type_lst = $5.req_params_type_lst;
+			$5.req_params_type_lst.clear();
+		}
+			| TYPE tk_id '(' M FUNC_DEC_ARGLIST_OPT ')' ';'
+		{
+			// Args list of main function must be empty
+			if($2.name == "main")
+			{
+				print_sem_error("Args list of main function must be empty");
+			}
+			
+			if(function_table.find($2.name) != function_table.end())
+			{
+				// The function is in the function table
+				
+				// Check the return type
+				if($1.type != function_table[$2.name].return_type)
+				{
+					print_sem_error("Return type of function '" + $2.name + "' does not match");
+				}
+				
+				// Check the number of parameters
+				if((function_table[$2.name].req_params_type.size() != 0) || (function_table[$2.name].opt_params_type.size() != $5.opt_params_type_lst.size()))
+				{
+					print_sem_error("Number of parameters of function '" + $2.name + "' does not match");
+				}
+				
+				// Check the parameters types
+				int num_of_params = function_table[$2.name].opt_params_type.size()
+				for(int i = 0; i < num_of_params; i++)
+				{
+					if(function_table[$2.name].opt_params_type[i] != $5.opt_params_type_lst[i])
+					{
+						print_sem_error("Type of parameters of function '" + $2.name + "' does not match");
+					}
+				}
+			}
+			else
+			{
+				// Insert the function to the function table
+				Function func;
+				func.return_type = $1.type;
+				func.is_defined = false;
+				func.opt_params_type = $5.opt_params_type_lst;
+				function_table.insert({$2.name, func});
+			}
+			return_type = $1.type;
+			$$.type = $1.type;
+			$$.name = $2.name;
+			$$.opt_params_type_lst = $5.opt_params_type_lst;
+			$5.opt_params_type_lst.clear();
+		}
+			| TYPE tk_id '(' M FUNC_ARGLIST ',' M FUNC_DEC_ARGLIST_OPT ')' ';'
+		{
+			// Args list of main function must be empty
+			if($2.name == "main")
+			{
+				print_sem_error("Args list of main function must be empty");
+			}
+			
+			if(function_table.find($2.name) != function_table.end())
+			{
+				// The function is in the function table
+				
+				// Check the return type
+				if($1.type != function_table[$2.name].return_type)
+				{
+					print_sem_error("Return type of function '" + $2.name + "' does not match");
+				}
+				
+				// Check the number of parameters
+				if((function_table[$2.name].req_params_type.size() != $5.req_params_type_lst.size()) || (function_table[$2.name].opt_params_type.size() != $8.opt_params_type_lst.size()))
+				{
+					print_sem_error("Number of parameters of function '" + $2.name + "' does not match");
+				}
+				
+				// Check the required parameters types
+				int num_of_req_params = function_table[$2.name].req_params_type.size()
+				for(int i = 0; i < num_of_req_params; i++)
+				{
+					if(function_table[$2.name].req_params_type[i] != $5.req_params_type_lst[i])
+					{
+						print_sem_error("Type of the required parameters of function '" + $2.name + "' does not match");
+					}
+				}
+				
+				// Check the optional parameters types
+				int num_of_opt_params = function_table[$2.name].opt_params_type.size()
+				for(int i = 0; i < num_of_opt_params; i++)
+				{
+					if(function_table[$2.name].opt_params_type[i] != $8.opt_params_type_lst[i])
+					{
+						print_sem_error("Type of the optional parameters of function '" + $2.name + "' does not match");
+					}
+				}
+			}
+			else
+			{
+				// Insert the function to the function table
+				Function func;
+				func.return_type = $1.type;
+				func.is_defined = false;
+				func.req_params_type = $5.req_params_type_lst;
+				func.opt_params_type = $8.opt_params_type_lst;
+				function_table.insert({$2.name, func});
+			}
+			return_type = $1.type;
+			$$.type = $1.type;
+			$$.name = $2.name;
+			$$.req_params_type_lst = $5.req_params_type_lst;
+			$5.req_params_type_lst.clear();
+			$$.opt_params_type_lst = $8.opt_params_type_lst;
+			$8.opt_params_type_lst.clear();
+		}
+	;
+
+	FUNC_DEC_ARGLIST_OPT : FUNC_DEC_ARGLIST_OPT ',' DCL_OPT
+		{
+			$$ = makeNode("FUNC_DEC_ARGLIST_OPT", NULL, $1);
+			concatList($1, $2);
+			concatList($1, $3);
+		}	
+			| DCL_OPT
+		{
+			$$ = makeNode("FUNC_DEC_ARGLIST_OPT", NULL, $1);
+		}
+	;
+
+	DCL_OPT : tk_id ':' tk_optional TYPE
+		{
+			$$ = makeNode("DCL_OPT", NULL, $1);
+			concatList($1, $2);
+			concatList($1, $3);
+			concatList($1, $4);
+		}
+			| tk_id ',' DCL_OPT
+		{
+			$$ = makeNode("DCL_OPT", NULL, $1);
+			concatList($1, $2);
+			concatList($1, $3);
+		}
+	;
+
+	FUNC_DEF_API : TYPE tk_id '(' ')'
+		{
+			$$ = makeNode("FUNC_DEF_API", NULL, $1);
+			concatList($1, $2);
+			concatList($1, $3);
+			concatList($1, $4);
+		}
+			| TYPE tk_id '(' FUNC_ARGLIST ')'
+		{
+			$$ = makeNode("FUNC_DEF_API", NULL, $1);
+			concatList($1, $2);
+			concatList($1, $3);
+			concatList($1, $4);
+			concatList($1, $5);
+		}
+			| TYPE tk_id '(' FUNC_DEF_ARGLIST_OPT ')'
+		{
+			$$ = makeNode("FUNC_DEF_API", NULL, $1);
+			concatList($1, $2);
+			concatList($1, $3);
+			concatList($1, $4);
+			concatList($1, $5);
+		}
+			| TYPE tk_id '(' FUNC_ARGLIST ',' FUNC_DEF_ARGLIST_OPT ')'
+		{
+			$$ = makeNode("FUNC_DEF_API", NULL, $1);
+			concatList($1, $2);
+			concatList($1, $3);
+			concatList($1, $4);
+			concatList($1, $5);
+			concatList($1, $6);
+			concatList($1, $7);
+		}
+	;
+ 
+	FUNC_DEF_ARGLIST_OPT : FUNC_DEF_ARGLIST_OPT ',' DCL_OPT_VAL
+		{
+			$$ = makeNode("FUNC_DEF_ARGLIST_OPT", NULL, $1);
+			concatList($1, $2);
+			concatList($1, $3);
+		}
+			| DCL_OPT_VAL
+		{
+			$$ = makeNode("FUNC_DEF_ARGLIST_OPT", NULL, $1);
+		}
+	;
+
+	DCL_OPT_VAL : tk_id tk_assign NUM ':' tk_optional TYPE 
+		{
+			$$ = makeNode("DCL_OPT_VAL", NULL, $1);
+			concatList($1, $2);
+			concatList($1, $3);
+			concatList($1, $4);
+			concatList($1, $5);
+			concatList($1, $6);
+		}
+			| tk_id tk_assign NUM ',' DCL_OPT_VAL
+		{
+			$$ = makeNode("DCL_OPT_VAL", NULL, $1);
+			concatList($1, $2);
+			concatList($1, $3);
+			concatList($1, $4);
+			concatList($1, $5);
+		}
+	;
+	
+	FUNC_ARGLIST : FUNC_ARGLIST ',' DCL
+		{
+			
+		}
+			| DCL
+		{
+			$$ = makeNode("FUNC_ARGLIST", NULL, $1);
+		}
+	;
+	
+	BLK : '{' BLKBEGIN STLIST M BLKEND '}'
+		{
+			buffer->backpatch($3.nextList, $4.quad);
+		}
+	;
+
+	DCL : tk_id ':' TYPE
+		{
+			// Check that variable type is not void
+			if($3.type == t_void)
+			{
+				print_sem_error("Type 'void' for variabe is invalid");
+			}
+			
+			// Check if the variable id already exists in the function parameters list. We don't need to check the temp_func_params to cover the case which there is only one id (the other cases are being covered in the other rule)
+			if(find(curr_func_params.begin(), curr_func_params.end(), $1.name) != curr_func_params.end())
+			{
+				print_sem_error("The parameter '" + $1.name + "' already exists in the function's parameters");
+			}
+			
+			$$.name = $1.name;
+			$$.type = $3.type;
+			
+			prev_mem_offset = curr_mem_offset;
+			$$.offset = curr_mem_offset;
+			
+			// Check if the symbol is defined
+			if(symbol_table.find($1.name) != symbol_table.end())
+			{
+				// The symbol exists in the symbol table
+				// Check if the variable is defined in the current scope level
+				if(symbol_table[$1.name].type.find(curr_scope_level) != symbol_table[$1.name].type.end())
+				{
+					print_sem_error("The parameter '" + $1.name + "' already exists in the current scope");
+				}
+				
+				else
+				{
+					// The variabe doesn't exist in the current scope level
+					symbol_table[$1.name].max_level = (curr_scope_level > symbol_table[$1.name].max_level) ? curr_scope_level : symbol_table[$1.name].max_level;
+					symbol_table[$1.name].type[curr_scope_level] = $3.type;
+					symbol_table[$1.name].offset[curr_scope_level] = curr_mem_offset;
+					curr_mem_offset += 4;
+				}
+				
+			}
+			
+			else
+			{
+				// The symbol doesn't exist in the symbol table
+				Symbol sym;
+				sym.max_level = curr_scope_level;
+				sym.type[curr_scope_level] = $3.type;
+				curr_mem_offset += 4;
+				symbol_table.insert({$1.name, sym});
+				temp_func_params.push_back($1.name);
+				//TODO: Check why we insert the symbol to temp_func_params here and not in the if (we think that the temp_func_params contains the args that are passed to the function, but from this logic it seems that it contains also the vars that are defined in the block)
+			}					
+		}
+			| tk_id ',' DCL
+		{
+			// Check that variable type is not void
+			if($3.type == t_void)
+			{
+				print_sem_error("Type 'void' for variabe is invalid");
+			}
+			
+			// Check if the variable id already exists in the function parameters list
+			if(find(curr_func_params.begin(), curr_func_params.end(), $1.name) != curr_func_params.end())
+			{
+				print_sem_error("The parameter '" + $1.name + "' already exists in the function's parameters");
+			}
+			
+			// Check if the variable id from the same type already exists in the temp function parameters list (before it enters the current parameters list)
+			if(find(temp_func_params.begin(), temp_func_params.end(), $1.name) != temp_func_params.end())
+			{
+				print_sem_error("The parameter '" + $1.name + "' already exists in the function's parameters");
+			}
+			
+			$$.name = $1.name;
+			$$.type = $3.type;
+			
+			// Check if the symbol is defined
+			if(symbol_table.find($1.name) != symbol_table.end())
+			{
+				// The symbol exists in the symbol table
+				// Check if the variable is defined in the current scope level
+				if(symbol_table[$1.name].type.find(curr_scope_level) != symbol_table[$1.name].type.end())
+				{
+					print_sem_error("The parameter '" + $1.name + "' already exists in the current scope");
+				}
+				
+				else
+				{
+					// The variabe doesn't exist in the current scope level
+					symbol_table[$1.name].max_level = (curr_scope_level > symbol_table[$1.name].max_level) ? curr_scope_level : symbol_table[$1.name].max_level;
+					symbol_table[$1.name].type[curr_scope_level] = $3.type;
+					symbol_table[$1.name].offset[curr_scope_level] = curr_mem_offset;
+					curr_mem_offset += 4;
+				}
+				
+			}
+			
+			else
+			{
+				// The symbol doesn't exist in the symbol table
+				Symbol sym;
+				sym.max_level = curr_scope_level;
+				sym.type[curr_scope_level] = $3.type;
+				curr_mem_offset += 4;
+				symbol_table.insert({$1.name, sym});
+				temp_func_params.push_back($1.name);
+				//TODO: Check why we insert the symbol to temp_func_params here and not in the if (we think that the temp_func_params contains the args that are passed to the function, but from this logic it seems that it contains also the vars that are defined in the block)
+			}	
+			
+		}
+	;
+
+	TYPE : tk_int
+		{
+			$$.type = t_int;
+		}
+			| tk_float 
+		{
+			$$.type = t_float;
+		}
+			| tk_void
+		{
+			$$.type = t_void;
+		}
+	;
+
+	STLIST : STLIST STMT
+		{}
+			| /* epsilon */
+		{}
+	;
+	STMT : DCL ';'
+		{
+			
+		}
+			| ASSN
+		{
+			$$ = makeNode("STMT", NULL, $1);
+		}
+			| EXP ';'
+		{
+			$$ = makeNode("STMT", NULL, $1);
+			concatList($1, $2);
+		}
+			| CNTRL
+		{
+			$$ = makeNode("STMT", NULL, $1);
+		}
+			| READ
+		{
+			$$ = makeNode("STMT", NULL, $1);
+		}
+			| WRITE
+		{
+			$$ = makeNode("STMT", NULL, $1);
+		}
+			| RETURN
+		{
+			$$ = makeNode("STMT", NULL, $1);
+		}
+			| BLK
+		{
+			$$ = makeNode("STMT", NULL, $1);
+		}
+	;
+ 
+	RETURN : tk_return EXP ';'
+		{
+			if(return_type == t_void)
+			{
+				print_sem_error("Return type 'void' is invalid");
+			}
+			
+			if(return_type != $2.type)
+			{
+				print_sem_error("Return type '" + $2.type + "' is invalid");
+			}
+			
+			if($2.type == t_int)
+			{
+				buffer->emit("STORI I" + to_string($2.reg) + " I1 -4");
+			}
+			else if($2.type == t_float)
+			{
+				buffer->emit("CITOF F1 I1");//TODO: verify that this is needed (maybe F1 is already equal to I1)
+				buffer->emit("STORF F" + to_string($2.reg) + " F1 -4"); 
+			}
+			
+			buffer->emit("RETRN");
+		}
+			| tk_return ';'
+		{
+			buffer->emit("LOADI I0 I2 4");
+			if(return_type != t_void)
+			{
+				print_sem_error("Return type '" + return_type + "' is invalid, should be 'void'");
+			}
+			buffer->emit("RETRN");
+		}
+	;
+
+	WRITE : tk_write '(' EXP ')' ';'
+		{
+			if ($3.type == t_int) {
+				buffer->emit("PRNTI I" + to_string($3.reg));
+			}
+			else if ($3.type == t_float) {
+				buffer->emit("PRNTF F" + to_string($3.reg));
+			}			
+		}
+			| tk_write '(' tk_str ')' ';'
+		{
+			for (int i = 0; i < $3.name.length(); i++) {
+				char ch = $3.name[i];
+				if (ch == '\\') {
+					if ($3.name[i + 1] == 'n') {
+						i++; 
+						ch = '\n';
+					}
+					else if ($3.name[i + 1] == '"') {
+						i++; 
+						ch = '\"';
+					}
+					else if ($3.name[i + 1] == 't') {
+						i++; 
+						ch = '\t';
+					}
+				}
+				int ascii_num = static_cast <int> (ch);
+				buffer->emit("PRNTC " + to_string(ascii_num));
+			}			
+		}
+	;
+
+	READ : tk_read '(' LVAL ')' ';'
+		{
+			if($3.type == t_int)
+			{
+				int tmp_int_reg = int_regs_num;
+				int_regs_num++;
+				buffer->emit("READI I" + to_string(tmp_int_reg));
+				buffer->emit("READI I" + to_string(tmp_int_reg));
+				buffer->emit("STORI I" + to_string(tmp_int_reg) + " I" + to_string($3.reg) + " 0");
+			}
+			else if($3.type == t_float)
+			{
+				int tmp_float_reg = float_regs_num;
+				float_regs_num++;
+				// READ to Ftmp
+				buffer->emit("READF F" + to_string(tmp_float_reg));
+				// Fcurr = (float)Ireg (Ireg contains the address of the id in LVAL)
+				buffer.emit("CITOF F" + to_string(float_regs_num) + " I" + to_string($3.reg));
+				// Mem[id address] = read value 
+				buffer->emit("STORF F" + to_string(tmp_float_reg) + " F" + to_string(float_regs_num) + " 0");
+				float_regs_num++;
+			}
+		}
+	;
+
+	ASSN : LVAL tk_assign EXP ';'
+		{
+			if($1.type == t_void)
+			{
+				print_sem_error("Assign to type 'void' is invalid");
+			}
+			
+			if($1.type != $3.type)
+			{
+				print_sem_error("Assign type '" +  $3.type + "' to type '" +$1.type + "' is invalid");
+			}
+			
+			if ($1.type == t_int) 
+			{
+				buffer->emit("STORI I" + to_string($3.reg) + " I" + to_string($1.reg) + " 0");
+			}
+			if ($1.type == type_float) 
+			{
+				// type is float -> store id address (Ireg1 that is an int register) to next free float register
+				int tmp_float_reg = float_regs_num;
+				float_regs_num++;
+				buffer->emit("CITOF F" + to_string(tmp_float_reg) + " I" + to_string($1.reg));
+				buffer->emit("STORF F" + to_string($3.reg) + " F" + to_string(tmp_float_reg) + " 0");
+			}
+			
+		}
+	;
+
+	LVAL : tk_id
+		{
+			if(symbol_table.find($1.name) == symbol_table.end())
+			{
+				print_sem_error("id '" + $1.name + "' is not declared");
+			}
+			int level = symbol_table[$1.name].max_level; // The most inner decleration of the symbol
+			
+			if(symbol_table[$1.name].type[level] == t_void)
+			{
+				print_sem_error("Type 'void' is invalid");
+			}
+			
+			$$.type = symbol_table[$1.name].type[level];
+			$$.reg = int_regs_num; // address is an integer
+			int_regs_num++;
+			$$.mem_offset = symbol_table[$1.name].offset[level];
+			// Ireg = I1 + offset = address of the symbol's place
+			buffer->emit("ADD2I I" + to_string($$.reg) + " I1 " + to_string($$.mem_offset));		
+		}
+	;
+	
+	//TODO: verify that the place of N is right (different in refs)
+	CNTRL : tk_if BEXP tk_then M STMT N tk_else M STMT
+		{
+			buffer->backpatch($2.trueList, $4.quad);
+			buffer->backpatch($2.falseList, $8.quad);
+			$$.nextList = merge<int>($5.nextList, $6.nextList);
+			$$.nextList = merge<int>($$.nextList, $9.nextList);
+			$5.nextList.clear();
+			$9.nextList.clear();
+			$6.nextList.clear();
+		}
+			| tk_if BEXP tk_then M STMT
+		{
+			buffer->backpatch($2.trueList, $4.quad);
+			$$.nextList = merge<int>($2.falseList, $5.nextList);
+			$2.falseList.clear();
+			$5.nextList.clear();
+		}
+			| tk_while M BEXP tk_do M STMT
+		{
+			buffer->backpatch($6.nextList, $2.quad);
+			buffer->backpatch($3.trueList, $5.quad);
+			$$.nextList = $3.falseList;
+			buffer->emit("UJUMP " + to_string($2.quad));
+		}
+	;
+	
+	BEXP : BEXP tk_or M BEXP 
+		{
+			buffer->backpatch($1.falseList, $3.quad);
+			$$.falseList = $4.falseList;
+			$$.trueList = merge<int>($1.trueList, $4.trueList);
+			$1.trueList.clear();
+			$4.trueList.clear();
+		}
+			| BEXP tk_and BEXP
+		{
+			buffer->backpatch($1.trueList, $3.quad);
+			$$.trueList = $4.trueList;
+			$$.falseList = merge<int>($1.falseList, $4.falseList);
+			$1.falseList.clear();
+			$4.falseList.clear();
+		}
+			| tk_not BEXP 
+		{
+			$$.trueList = $2.falseList;
+			$$.falseList = $2.trueList;
+		}
+			| EXP tk_relop EXP
+		{
+			if($1.type == t_void || $3.type == t_void)
+			{
+				print_sem_error("Type 'void' is invalid for this operation");
+			}
+			
+			if($1.type != $3.type)
+			{
+				print_sem_error("Invalid operation for types that don't match");
+			}
+			
+			if($1.type == t_int)
+			{
+				$$.reg = int_regs_num;
+				int_regs_num++;
+				// Prepare backpatch for UJUMP
+				$$.falseList.push_back(buffer->nextquad() + 1);
+				// Prepare backpatch for BNEQZ 
+				$$.trueList.push_back(buffer->nextquad() + 2);
+				
+				switch($2.name)
+				{
+					case "==":
+						buffer->emit("SEQUI I" + to_string($$.reg) + " I" + to_string($1.reg) + " I" + to_string($3.reg));
+						buffer->emit("BREQZ I" + to_string($$.reg) + " ");
+						break;
+					
+					case "<>":
+						buffer->emit("SNEQI I" + to_string($$.reg) + " I" + to_string($1.reg) + " I" + to_string($3.reg));
+						buffer->emit("BREQZ I" + to_string($$.reg) + " ");
+						break;
+						
+					case "<":
+						buffer->emit("SLETI I" + to_string($$.reg) + " I" + to_string($1.reg) + " I" + to_string($3.reg));
+						buffer->emit("BREQZ I" + to_string($$.reg) + " ");
+						break;
+					
+					case "<=":
+						buffer->emit("SGRTI I" + to_string($$.reg) + " I" + to_string($1.reg) + " I" + to_string($3.reg));
+						buffer->emit("BNEQZ I" + to_string($$.reg) + " ");
+						break;
+					
+					case ">":
+						buffer->emit("SGRTI I" + to_string($$.reg) + " I" + to_string($1.reg) + " I" + to_string($3.reg));
+						buffer->emit("BREQZ I" + to_string($$.reg) + " ");
+						break;
+					
+					case ">=":
+						buffer->emit("SLETI I" + to_string($$.reg) + " I" + to_string($1.reg) + " I" + to_string($3.reg));
+						buffer->emit("BNEQZ I" + to_string($$.reg) + " ");
+						break;
+				}
+			}
+			
+			else if($1.type == t_float)
+			{
+				$$.reg = float_regs_num;
+				float_regs_num++;
+				int int_reg = int_regs_num;
+				int_regs_num++;
+				// Prepare backpatch for UJUMP
+				$$.falseList.push_back(buffer->nextquad() + 2);
+				// Prepare backpatch for BNEQZ 
+				$$.trueList.push_back(buffer->nextquad() + 3);
+				
+				switch($2.name)
+				{
+					case "==":
+						buffer->emit("SEQUF F" + to_string($$.reg) + " F" + to_string($1.reg) + " F" + to_string($3.reg));
+						buffer->emit("CFTOI I" + to_string(int_reg) + " F" + to_string($$.reg));
+						buffer->emit("BREQZ I" + to_string(int_reg) + " ");
+						break;
+					
+					case "<>":
+						buffer->emit("SNEQF F" + to_string($$.reg) + " F" + to_string($1.reg) + " F" + to_string($3.reg));
+						buffer->emit("CFTOI I" + to_string(int_reg) + " F" + to_string($$.reg));
+						buffer->emit("BREQZ I" + to_string(int_reg) + " ");
+						break;
+						
+					case "<":
+						buffer->emit("SLETF F" + to_string($$.reg) + " F" + to_string($1.reg) + " F" + to_string($3.reg));
+						buffer->emit("CFTOI I" + to_string(int_reg) + " F" + to_string($$.reg));
+						buffer->emit("BREQZ I" + to_string(int_reg) + " ");
+						break;
+					
+					case "<=":
+						buffer->emit("SGRTF F" + to_string($$.reg) + " F" + to_string($1.reg) + " F" + to_string($3.reg));
+						buffer->emit("CFTOI I" + to_string(int_reg) + " F" + to_string($$.reg));
+						buffer->emit("BNEQZ I" + to_string(int_reg) + " ");
+						break;
+					
+					case ">":
+						buffer->emit("SGRTF F" + to_string($$.reg) + " F" + to_string($1.reg) + " F" + to_string($3.reg));
+						buffer->emit("CFTOI I" + to_string(int_reg) + " F" + to_string($$.reg));
+						buffer->emit("BREQZ I" + to_string(int_reg) + " ");
+						break;
+					
+					case ">=":
+						buffer->emit("SLETF F" + to_string($$.reg) + " F" + to_string($1.reg) + " F" + to_string($3.reg));
+						buffer->emit("CFTOI I" + to_string(int_reg) + " F" + to_string($$.reg));
+						buffer->emit("BNEQZ I" + to_string(int_reg) + " ");
+						break;
+				}
+			}
+			
+			buffer->emit("UJUMP ");
+		}
+			| '(' BEXP ')'
+		{
+			$$.trueList = $2.trueList;
+			$$.falseList = $2.falseList;
+		}
+	;
+ 
+	EXP : EXP tk_addop EXP
+		{
+			if($1.type == t_void || $3.type == t_void)
+			{
+				print_sem_error("'void' is invalid type in the expression"); 
+			}
+			
+			if($1.type != $3.type)
+			{
+				print_sem_error("Arguments type does not match");
+			}
+			
+			if($1.type == t_int)
+			{
+				if ($2.name == "+") 
+				{
+					buffer->emit("ADD2I I" + to_string(int_regs_num) + " I" + to_string($1.reg) + " I" + to_string($3.reg));
+				}
+				else 
+				{
+					buffer->emit("SUBTI I" + to_string(int_regs_num) + " I" + to_string($1.reg) + " I" + to_string($3.reg));
+				}
+				$$.reg = int_regs_num;
+				int_regs_num++;
+			}
+			
+			else if($1.type == t_float)
+			{
+				if ($2.name == "+") 
+				{
+					buffer->emit("ADD2F F" + to_string(float_regs_num) + " F" + to_string($1.reg) + " F" + to_string($3.reg));
+				}
+				else 
+				{
+					buffer->emit("SUBTF F" + to_string(float_regs_num) + " F" + to_string($1.reg) + " F" + to_string($3.reg));
+				}
+				$$.reg = float_regs_num;
+				float_regs_num++;
+			}
+			$$.type = $1.type;
+		}
+			| EXP tk_mulop EXP
+		{
+			if($1.type == t_void || $3.type == t_void)
+			{
+				print_sem_error("'void' is invalid type in the expression"); 
+			}
+			
+			if($1.type != $3.type)
+			{
+				print_sem_error("Arguments type does not match");
+			}
+			
+			if($1.type == t_int)
+			{
+				if ($2.name == "*") 
+				{
+					buffer->emit("MULTI I" + to_string(int_regs_num) + " I" + to_string($1.reg) + " I" + to_string($3.reg));
+				}
+				else 
+				{
+					buffer->emit("DIVDI I" + to_string(int_regs_num) + " I" + to_string($1.reg) + " I" + to_string($3.reg));
+				}
+				$$.reg = int_regs_num;
+				int_regs_num++;
+			}
+			
+			else if($1.type == t_float)
+			{
+				if ($2.name == "*") 
+				{
+					buffer->emit("MULTF F" + to_string(float_regs_num) + " F" + to_string($1.reg) + " F" + to_string($3.reg));
+				}
+				else 
+				{
+					buffer->emit("DIVDF F" + to_string(float_regs_num) + " F" + to_string($1.reg) + " F" + to_string($3.reg));
+				}
+				$$.reg = float_regs_num;
+				float_regs_num++;
+			}
+			$$.type = $1.type;
+		}
+			| '(' EXP ')'
+		{
+			$$ = $2;
+		}
+			| '(' TYPE ')' EXP
+		{
+			//TODO: look at the answer in the forum
+		}
+			| tk_id 
+		{
+			if(symbol_table.find($1.name) == symbol_table.end())
+			{
+				print_sem_error("'" + $1.name + "' does not exist");
+			}
+			
+			int level = symbol_table[$1.name].max_level;
+			if(symbol_table[$1.name].type[level] == t_void)
+			{
+				print_sem_error("Type 'void' is invalid");
+			}
+			$$.type = symbol_table[$1.name].type[level];
+			$$.name = $1.name;
+			$$.mem_offset = symbol_table[$1.name].offset[level];
+			
+			if($$.type == t_int)
+			{
+				$$.reg = int_regs_num;
+				buffer->emit("LOADI I" + to_string($$.reg) + " I1 " + to_string($$.mem_offset));
+				int_regs_num++;
+			}
+
+			else if($$.type == t_float)
+			{
+				$$.reg = float_regs_num;
+				buffer->emit("CITOF F1 I1");
+				buffer->emit("LOADF F" + to_string($$.reg) + " F1 " + to_string($$.mem_offset));
+				float_regs_num++;
+			}
+		}
+			| NUM
+		{
+			$$.name = $1.name;
+			$$.type = $1.type;
+			
+			if($$.type = t_int)
+			{
+				$$.reg = int_regs_num;
+				int_regs_num++;
+				buffer->emit("COPYI I" + to_string($$.reg) + " " + $1.name);
+			}
+			
+			else if($$.type == t_float)
+			{
+				$$.reg = float_regs_num;
+				float_regs_num++;
+				buffer->emit("COPYF F" + to_string($$.reg) + " " + $1.name);
+			}
+		}
+			| CALL
+		{
+			$$.type = $1.type;
+			$$.reg = $1.reg;
+		}
+	;
+ 
+	NUM : tk_integernum
+		{
+			$$.type = t_int;
+			$$.name = $1.name;
+			$$.reg = int_regs_num;
+			int_regs_num++;
+			buffer->emit("COPYI I" + to_string($$.reg) + " " + $1.name);
+		}
+			| tk_realnum
+		{
+			$$.type = t_float;
+			$$.name = $1.name;
+			$$.reg = float_regs_num;
+			float_regs_num++;
+			buffer->emit("COPYF F" + to_string($$.reg) + " " + $1.name);
+		}
+	;
+
+	CALL : tk_id '(' CALL_ARGS ')' //TODO: make sure that F1=I1 and F2=I2 look at the new ref
+		{
+			$$ = makeNode("CALL", NULL, $1);
+			concatList($1, $2);
+			concatList($1, $3);
+			concatList($1, $4);
+		}
+	;
+
+	CALL_ARGS : CALL_ARGLIST
+		{
+			$$ = makeNode("CALL_ARGS", NULL, $1);
+		}
+			| /* epsilon */
+		{
+			$$ = makeNode("CALL_ARGS", NULL, makeNode("EPSILON", NULL, NULL));
+		}
+	;
+
+	CALL_ARGLIST : CALL_ARGLIST ',' EXP
+		{
+			$$ = makeNode("CALL_ARGLIST", NULL, $1);
+			concatList($1, $2);
+			concatList($1, $3);
+		}
+			| EXP
+		{
+			$$ = makeNode("CALL_ARGLIST", NULL, $1);
+		}
+	;
+	
+	M : /* epsilon */ 
+		{
+			$$.quad = buffer->next_quad();
+		}
+	;
+ 
+	N : /* epsilon */ 
+		{
+			$$.nextList.push_back(buffer->next_quad());
+			buffer->emit("UJUMP ");
+		}
+	;
+	
+	BLKBEGIN : /* epsilon */ 
+		{
+			curr_scope_level++;
+		}
+	;
+	
+	BLKEND : /* epsilon */
+		{
+			for(map<string,Symbol>::iterator it = symbol_table.begin(); it != symbol_table.end(); it++)
+			{
+				if(it->second.max_level == curr_scope_level)
+				{
+					int is_last = 1; // flag that says if this is the last scope which the symbol is defined in
+					for(int i = curr_scope_level - 1; i > 0; i--) //find the next scope where the symbol exists
+					{
+						if(it->second.type.find(i) != it->second.type.end()) // if the symbol exists in this scope level
+						{
+							it->second.max_level = i;
+							is_last = 0;
+						}
+					}
+					if(is_last) //last scope -> delete the symbol from symbol table
+					{
+						symbol_table.erase(it->first);
+					}
+					else // not the last scope -> delete only the symbol from the current scope
+					{
+						it->second.type.erase(curr_scope_level);
+						it->second.offset.erase(curr_scope_level);
+					}
+				}
+			}
+		}
+	;
+
+%%
+	/* C user routines */
+	
+	int main(int argc, char* argv[])
+	{
+		if (argc != 2)
+		{
+			print_op_error("Invalid number of arguments");
+		}
+	}
+	
+	
+	void yyerror(const char* c)
+	{
+		cerr << "Syntax error: '" << yytext << "' in line number " << yylineno << endl;
+		exit(SYN_ERR);
+	}
+	
+	void print_sem_error(string err_msg)
+	{
+		cerr << "Semantic error: " << err_msg << " in line number " << yylineno << endl;
+		exit(SEM_ERR);
+	}
+	
+	void print_op_error(string err_msg)
+	{
+		cerr << "Operational error: " << err_msg << endl;
+		exit(OP_ERR);
+	}

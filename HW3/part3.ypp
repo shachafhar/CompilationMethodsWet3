@@ -1,0 +1,684 @@
+%{
+    /* C user declerations*/
+    /* Header section: Include libraries, define global variables, function prototypes */
+	#include <stdio.h>
+
+    #include "part3.hpp"
+	#include "part3.tab.hpp"
+
+    extern int yylex();
+    extern int yylineno;
+    extern char* yytext;
+
+
+    // void yyerror(const char *err);
+    void syntaxError(string err);
+    void semanticError(string err);
+    void operationalError(string err);
+    void check_main_func_ret_val(string func_name, int func_type);
+    void check_main_func_args(string func_name);
+    void check_redeclared_func(string func_name);
+    void check_declared_func(string func_name);
+    bool check_redefined_func(string func_name);
+    void check_func_type(string func_name, int func_type);
+    void check_nof_arguments_and_type(string func_name, vector<Type> required_params_types, vector<Type> optional_params_types);
+    void check_call_nof_arguments_and_type(string func_name, vector<Type> required_params_types, vector<Type> optional_params_types);
+    void separate_required_and_optional_params(string func_name, vector<Type>& required_params_types, vector<Type>& optional_params_types, vector<Type>& call_params_types);
+    void add_func_to_map(Type return_type, string name, bool implement, int start_address, vector<Type> required_params_types, vector<Type> optional_params_types);
+    vector<string> concatenate_vectors(const vector<string>& vec1, const vector<string>& vec2);
+    void check_argument_not_void(Type type);
+    void check_redefined_argument(string param_name);
+    void check_argument_in_symbol_map(string param_name);
+    void add_symbol_to_symbol_vector(Type type, string param_name);
+    void add_symbol_to_symbol_map(Type type, string param_name);
+    void check_exp_not_void(Type exp1_type, Type exp2_type);
+    void check_exp_same_type(Type exp1_type, Type exp2_type);
+    void check_void_cast(Type wanted_type, Type original_type);
+
+    // ParserNode* parseTree = NULL; // global tree pointer 
+
+%}
+
+/* Token definitions */
+%token int_token float_token void_token
+%token write_token 
+%token read_token 
+%token optional_token 
+%token while_token 
+%token do_token 
+%token return_token
+%token id_token 
+%token integernum_token
+%token realnum_token 
+%token str_token 
+
+/* Operator precedence and associativity */
+%right assign_token
+%right if_token then_token else_token
+%left or_token
+%left and_token
+%left relop_token
+%left addop_token
+%left mulop_token
+%right not_token
+%left '('
+%left ')'
+%left '{'
+%left '}'
+%left ','
+%left ':'
+%left ';'
+// Biggest priority is the last row 
+%%
+
+/* Grammar rules */
+
+PROGRAM :   FDEFS {
+
+
+            }
+;
+
+FDEFS   :   FDEFS FUNC_DEF_API BLK {
+
+            }
+        |   FDEFS FUNC_DEC_API {
+
+            }
+        |   /*epsilon*/ {
+
+            }
+;
+
+FUNC_DEC_API    :   TYPE id_token '(' ')' ';' {
+                        check_main_func_ret_val($2.name, $1.type);
+                        check_redeclared_func($2.name);
+                        // If you get here the function is not declared yet
+                        add_func_to_map($1.type, $2.name, false, -1, NULL, NULL);
+                    }
+                |   TYPE id_token '(' M FUNC_ARGLIST ')' ';' {
+                        check_main_func_args($2.name);
+                        check_redeclared_func($2.name);
+                        // If you get here the function is not declared yet
+                        add_func_to_map($1.type, $2.name, false, -1, $5.required_params_types, NULL);
+                    }
+                |   TYPE id_token '(' M FUNC_DEC_ARGLIST_OPT ')' ';' {
+                        check_main_func_args($2.name);
+                        check_redeclared_func($2.name);
+                        // If you get here the function is not declared yet
+                        add_func_to_map($1.type, $2.name, false, -1, NULL, $5.optional_params_types);
+                    }
+                |   TYPE id_token '(' M FUNC_ARGLIST ',' FUNC_DEC_ARGLIST_OPT ')' ';' {
+                        check_main_func_args($2.name);
+                        check_redeclared_func($2.name);
+                        // If you get here the function is not declared yet
+                        add_func_to_map($1.type, $2.name, false, -1, $5.required_params_types, $7.optional_params_types);
+                    }
+;
+
+FUNC_DEC_ARGLIST_OPT    :   FUNC_DEC_ARGLIST_OPT',' DCL_OPT {
+                                reverse(function_params_symbols.begin(), function_params_symbols.end());
+                            }
+                        |   DCL_OPT {
+                                reverse(function_params_symbols.begin(), function_params_symbols.end());
+                            }
+;
+
+DCL_OPT :   id_token ':' optional_token TYPE {
+                check_argument_not_void($4.type);
+                check_redefined_argument($1.name);
+                // If we get here the symbol is not defined inthe same function
+                add_symbol_to_symbol_vector($4.type, $1.name);
+                $$.type = $4.type;
+
+            }
+        |   id_token ',' DCL_OPT {
+                check_argument_not_void($3.type);
+                check_redefined_argument($1.name);
+                // If we get here the symbol is not defined inthe same function
+                add_symbol_to_symbol_vector($3.type, $1.name);
+                $$.type = $3.type;
+
+            }
+;
+
+FUNC_DEF_API    :   TYPE id_token '(' M ')' {
+                        check_main_func_ret_val($2.name, $1.type);
+                        bool function_declared = check_redefined_func($2.name);
+                        // If you get here the function is not defined yet
+                        if (function_declared) {
+                            check_func_type($2.name, $1.type);
+                            functions_map[$2.name].implemented = true;
+                            functions_map[$2.name].start_address = $4.quad;
+                        }
+                        else {
+                            add_func_to_map($1.type, $2.name, true, $4.quad, NULL);
+                        }
+                        
+                    }
+                |   TYPE id_token '(' M FUNC_ARGLIST ')' {
+                        check_main_func_args($2.name);
+                        bool function_declared = check_redefined_func($2.name);
+                        // If you get here the function is not defined yet
+                        if (function_declared) {
+                            check_func_type($2.name, $1.type);
+                            check_nof_arguments_and_type($2.name, $5.required_params_types, NULL); // Check same arguments as declared
+                            functions_map[$2.name].implemented = true;
+                            functions_map[$2.name].start_address = $4.quad;
+                        }
+                        else {
+                            add_func_to_map($1.type, $2.name, true, $4.quad, $5.required_params_types, NULL);
+                        }
+                    }
+                |   TYPE id_token '(' M FUNC_DEF_ARGLIST_OPT ')' {
+                        check_main_func_args($2.name);
+                        bool function_declared = check_redefined_func($2.name);
+                        // If you get here the function is not defined yet
+                        if (function_declared) {
+                            check_func_type($2.name, $1.type);
+                            check_nof_arguments_and_type($2.name, NULL, $5.optional_params_types); // Check same arguments as declared
+                            functions_map[$2.name].implemented = true;
+                            functions_map[$2.name].start_address = $4.quad;
+                        }
+                        else {
+                            add_func_to_map($1.type, $2.name, true, $4.quad, NULL, $5.optional_params_types);
+                        }
+                    }
+                |   TYPE id_token '(' M FUNC_ARGLIST ',' FUNC_DEF_ARGLIST_OPT ')' {
+                        check_main_func_args($2.name);
+                        bool function_declared = check_redefined_func($2.name); // Return true if function was declared
+                        // If you get here the function is not defined yet
+                        if (function_declared) {
+                            check_func_type($2.name, $1.type);
+                            check_nof_arguments_and_type($2.name, $5.required_params_types, $7.optional_params_types); // Check same arguments as declared
+                            functions_map[$2.name].implemented = true;
+                            functions_map[$2.name].start_address = $4.quad;
+                        }
+                        else {
+                            add_func_to_map($1.type, $2.name, true, $4.quad, $5.required_params_types, $7.optional_params_types);
+                        }
+                    }
+;
+
+// a=1, b=2, c=3 : optional int, d=1.1, e=2.2, f=3.3 : optional float
+
+FUNC_DEF_ARGLIST_OPT    :   FUNC_DEF_ARGLIST_OPT ',' DCL_OPT_VAL {
+                                reverse(function_params_symbols.begin(), function_params_symbols.end());
+                            }
+                        |   DCL_OPT_VAL {
+                                reverse(function_params_symbols.begin(), function_params_symbols.end());
+                            }
+;
+
+// a=1, b=2, c=3 : optional int
+
+DCL_OPT_VAL :   id_token assign_token NUM ':' optional_token TYPE { // Definition Function
+                    check_argument_not_void($6.type);
+                    check_redefined_argument($1.name);
+                    // If we get here the symbol is not defined inthe same function
+                    add_symbol_to_symbol_vector($6.type, $1.name);
+                    $$.type = $6.type;
+                }
+            |   id_token assign_token NUM ',' DCL_OPT_VAL {
+                    check_argument_not_void($6.type);
+                    check_redefined_argument($1.name);
+                    // If we get here the symbol is not defined inthe same function
+                    add_symbol_to_symbol_vector($6.type, $1.name);
+                    $$.type = $5.type;
+                }
+;
+
+// a,b,c:int, d,e,f:float
+
+FUNC_ARGLIST    :   FUNC_ARGLIST ',' DCL {
+                        reverse(function_params_symbols.begin(), function_params_symbols.end());
+                    }
+                |   DCL {
+                        reverse(function_params_symbols.begin(), function_params_symbols.end());
+                    }
+;
+
+BLK :   '{' BLK_START STLIST M BLK_END '}' {
+
+   
+        }
+;
+
+BLK_START : /*epsilon*/ {
+                current_depth++; // Entering new function, increasing the global depth counter
+            }
+;
+
+BLK_END : /*epsilon*/ {
+                current_depth--; // Exiting function, decreasing the global depth counter
+            }
+;
+
+// a,b,c:int
+
+DCL :   id_token ':' TYPE {
+            check_argument_not_void($3.type);
+            check_redefined_argument($1.name);
+            // If we get here the symbol is not defined in the same function
+            add_symbol_to_symbol_vector($3.type, $1.name);
+            $$.type = $3.type;
+        }
+    |   id_token ',' DCL {
+            check_argument_in_symbol_map($1.name);
+            // If we get here the symbol is not defined inthe same function
+            add_symbol_to_symbol_map($3.type, $1.name);
+            $$.type = $3.type;
+        }
+;
+
+TYPE    :   int_token {
+                $$.type = int_t;
+            }
+        |   float_token {
+                $$.type = float_t;
+            }
+        |   void_token {
+                $$.type = void_t;
+            }
+;
+
+STLIST  :   STLIST STMT {
+
+
+            }
+        |   /*epsilon*/ {
+
+            }
+;
+
+STMT    :   DCL ';' {
+
+
+            }
+        |   ASSN {
+
+            }
+        |   EXP ';' {
+		if ($1.type != void_t) {
+			semanticError("EXP type is not void"); // semantic rules - 2
+		}
+
+            }
+        |   CNTRL {
+
+            }
+        |   READ {
+
+            }
+        |   WRITE {
+
+            }
+        |   RETURN {
+
+            }
+        |    BLK {
+
+            }
+;
+
+RETURN  :   return_token EXP ';' {
+
+
+            }
+        |   return_token ';' {
+
+
+            }
+;
+
+WRITE   :   write_token '(' EXP ')' ';' {
+
+
+            }
+        |   write_token '(' str_token ')' ';' {
+
+
+            }
+;
+
+READ    :   read_token '(' LVAL ')' ';' {
+
+
+            }
+;
+
+ASSN    :   LVAL assign_token EXP ';' {
+
+
+            }
+;
+
+LVAL    :   id_token {
+
+            }
+;
+
+CNTRL   :   if_token BEXP then_token STMT else_token STMT {
+
+
+        }
+        |   if_token BEXP then_token STMT {
+
+
+        }
+        |   while_token BEXP do_token STMT {
+
+
+        }
+;
+
+BEXP    :   BEXP or_token BEXP {
+
+
+            }
+        |   BEXP and_token BEXP {
+
+
+            }
+        |   not_token BEXP {
+
+;
+            }
+        |   EXP relop_token EXP {
+
+
+            }
+        |   '(' BEXP ')' {
+
+
+            }
+;
+
+EXP :   EXP addop_token EXP {
+            check_exp_not_void($1.type, $3.type); // semantic rule - 2
+            check_exp_same_type($1.type, $3.type); // semantic rule - 1
+            $$.type = $1.type;
+        }
+    |   EXP mulop_token EXP {
+            check_exp_not_void($1.type, $3.type); // semantic rule - 2
+            check_exp_same_type($1.type, $3.type); // semantic rule - 1
+            $$.type = $1.type;
+        }
+    |   '(' EXP ')' {
+            // $$ = $2;
+            $$.type = $2.type;
+
+        }
+    |   '(' TYPE ')' EXP {
+            check_void_cast($2.type, $4.type);
+            $$.type = $2.type;
+        }
+    |   id_token {
+
+        }
+    |   NUM {
+
+        }
+    |   CALL {
+
+        }
+;
+
+NUM :   integernum_token {
+
+        }
+    |   realnum_token {
+
+        }
+;
+
+CALL    :   id_token '(' CALL_ARGS ')' {
+                check_declared_func($1.name);
+                vector<Type> required_params_types;
+	            vector<Type> optional_params_types;
+                separate_required_and_optional_params($1.name, required_params_types, optional_params_types, $3.call_params_types);
+                check_call_nof_arguments_and_type($1.name, required_params_types, optional_params_types);
+                add_arguments_to_symbol_map($1.name, $3.call_params_types.size());
+
+                // $$.required_params_types = required_params_types;
+                // $$.optional_params_types = optional_params_types;
+
+                $3.call_params_types.clear();
+            }
+;
+
+CALL_ARGS   :   CALL_ARGLIST {
+                    
+                    $$.call_params_types = $1.call_params_types;
+                    $1.call_params_types.clear();
+                }
+            |   /*epsilon*/ {
+
+            }
+;
+
+CALL_ARGLIST    :   CALL_ARGLIST ',' EXP {
+                        $$.call_params_types = $1.call_params_types;
+                        $$.call_params_types.push_back($3.type);
+                        $1.call_params_types.clear();
+                    }
+                |   EXP {
+                        $$.call_params_types.push_back($1.type);
+                    }
+;
+
+%%
+/* C user routines - Optional additional code section */
+
+void main(int argc, char** argv) {
+    if (argc != 2) {  // must be just one input
+        operationalError("Invalid number of arguments to the compiler")
+    }
+    // Get the input file name from command-line arguments
+    const char* inputFileName = argv[1];
+
+    // Check if the input file name ends with ".cmm"
+    const char* extension = ".cmm";
+    size_t extLength = strlen(extension);
+    size_t fileNameLength = strlen(inputFileName);
+    if (fileNameLength <= extLength ||
+        strcmp(inputFileName + fileNameLength - extLength, extension) != 0) {
+            operationalError("Input file must have a '.cmm' extension");
+    }
+
+    yyparse(); // the main operation 
+    
+    return;
+}
+
+
+/* helper functions */
+
+void syntaxError(string err) {
+    cerr << "Syntax error: " << err << "in line number" << yylineno << endl;  
+    exit(2);
+}
+
+void semanticError(string err) {
+    cerr << "Semantic error: " << err << "in line number" << yylineno << endl;  
+    exit(3);
+}
+
+void operationalError(string err) {
+    cerr << "Operational error: " << err << endl;  
+    exit(9);
+}
+
+void check_main_func_ret_val(string func_name, int func_type) {
+    // check if the function is main and if it is - check that returns void
+    if ( (func_name == "main") && (func_type != t_void) ) {
+        semanticError("Main function, but not void return type");
+    }
+}
+
+void check_main_func_args(string func_name) {
+    // check if the function is main
+    if (func_name == "main") {
+        semanticError("Main function, but with arguments");
+    }
+}
+
+void check_declared_func(string func_name) {
+    if (functions_map.find(func_name) == functions_map.end()) { // The function wasn't declared
+        semanticError("Function " + func_name + " wasn't declared");
+    }
+}
+
+void check_redeclared_func(string func_name) {
+    if (functions_map.find(func_name) != functions_map.end()) { // The function was declared / implemented
+        semanticError("Redeclaration of function " + func_name);
+    }
+}
+
+bool check_redefined_func(string func_name) { // return true if the function is already declared false else
+    bool already_declared = false;
+    if (functions_map.find(func_name) != functions_map.end()) { // The function was declared / implemented
+        if (functions_map[func_name].implemented) {
+            semanticError("Redefinition of function " + func_name);
+        }
+        already_declared = true;
+    }
+    return already_declared;
+}
+
+void check_func_type(string func_name, int func_type) {
+    // check if the declared function type is same as the defined function type
+    if (functions_map[func_name].return_type != func_type) {
+        semanticError("Conflict in return types of function " + func_name);
+    }
+}
+
+void check_nof_arguments_and_type(string func_name, vector<Type> required_params_types, vector<Type> optional_params_types) {
+    // check if the declared function arguments types are same as the defined function arguments types
+    if ((functions_map[func_name].required_params_types.size() != required_params_types.size()) || 
+        (functions_map[func_name].optional_params_types.size() != optional_params_types.size())) {
+        semanticError("Conflict in number of arguments of function " + func_name);
+    }
+    for (int i = 0; i < required_params_types.size(); i++) {
+        if (functions_map[func_name].required_params_types[i] != required_params_types[i]) {
+            semanticError("Conflict in type of " + i + "th required argument of function " + func_name);
+        }
+    }
+    for (int i = 0; i < optional_params_types.size(); i++) {
+        if (functions_map[func_name].optional_params_types[i] != optional_params_types[i]) {
+            semanticError("Conflict in type of " + i + "th optional argument of function " + func_name);
+        }
+    }
+}
+
+void check_call_nof_arguments_and_type(string func_name, vector<Type> required_params_types, vector<Type> optional_params_types) {
+    // check if the call function arguments types are same as the declared function arguments types
+    if ((functions_map[func_name].required_params_types.size() != required_params_types.size()) || 
+        (functions_map[func_name].optional_params_types.size() < optional_params_types.size())) {
+        semanticError("Conflict in number of arguments of function " + func_name);
+    }
+    for (int i = 0; i < required_params_types.size(); i++) {
+        if (functions_map[func_name].required_params_types[i] != required_params_types[i]) {
+            semanticError("Conflict in type of " + i + "th required argument of function " + func_name);
+        }
+    }
+    for (int i = 0; i < optional_params_types.size(); i++) {
+        if (functions_map[func_name].optional_params_types[i] != optional_params_types[i]) {
+            semanticError("Conflict in type of " + i + "th optional argument of function " + func_name);
+        }
+    }
+}
+
+void separate_required_and_optional_params(string func_name, vector<Type>& required_params_types, vector<Type>& optional_params_types, vector<Type>& call_params_types) {
+    if (functions_map[func_name].required_params_types.size() > call_params_types.size()) {
+        semanticError("Not enough required arguments of function " + func_name);
+    }
+    for (int i = 0; i < call_params_types.size(); i++) {
+        if (i < functions_map[func_name].required_params_types.size()) {
+            required_params_types.push_back(call_params_types[i]);
+        }
+        else {
+            optional_params_types.push_back(call_params_types[i]);
+        }
+    }
+}
+
+
+void add_func_to_map(Type return_type, string name, bool implement, int start_address, vector<Type> required_params_types, vector<Type> optional_params_types) {
+    Function function;
+    function.return_type = return_type;
+    function.name = name;
+    function.params_symbols = function_params_symbols;
+    function.implement = implement;
+    function.start_address = start_address;
+    function.required_params_types = required_params_types;
+    function.optional_params_types = optional_params_types;
+    functions_map.insert(pair<string, Function>(name, function));
+    function_params_symbols.clear();
+}
+
+vector<string> concatenate_vectors(const vector<string>& vec1, const vector<string>& vec2) {
+    vector<string> combined_vector;
+    combined_vector.reserve(vec1.size() + vec2.size());
+    combined_vector.insert(combined_vector.end(), vec1.begin(), vec1.end());
+    combined_vector.insert(combined_vector.end(), vec2.begin(), vec2.end());
+    return combined_vector;
+}
+
+void check_argument_not_void(Type type) {
+    if (type == void_t) {
+        semanticError("Argument type set to void");
+    }
+}
+
+void check_redefined_argument(string param_name) {
+    for (const Symbol& symbol : function_params_symbols) {
+        if (symbol.name == param_name) {
+            // Symbol with the same name found
+            semanticError("Redefined argument " + param_name + " in the same function");
+        }
+    }
+}
+
+void check_argument_in_symbol_map(string param_name) {
+    if (symbol_map.find(param_name) != symbol_map.end()) { // We found same param name in symbol map
+        if (symbol_map[param_name].depth == current_depth) {
+            semanticError("Redefined argument " + param_name + " in the same function");
+        }
+    }
+}
+
+void add_symbol_to_symbol_vector(Type type, string param_name) {
+    Symbol symbol;
+    symbol.type = type;
+    symbol.name = param_name;
+    symbol.depth = -1;
+    function_params_symbols.push_back(symbol);
+}
+
+void add_symbol_to_symbol_map(Type type, string param_name) {
+    Symbol symbol;
+    symbol.type = type;
+    symbol.name = param_name;
+    symbol.depth = current_depth;
+    symbol_map.insert(<string, Symbol>(param_name, symbol));
+}
+
+void check_exp_not_void(Type exp1_type, Type exp2_type) {
+    if (exp1_type == void_t || exp2_type == void_t) { 
+        semanticError("Can't make operation between void EXP")
+    }
+}
+
+void check_exp_same_type(Type exp1_type, Type exp2_type) {
+    if (exp1_type != exp2_type) { 
+        semanticError("Operation between two different types")
+    }
+}
+
+void check_void_cast(Type wanted_type, Type original_type) {
+    if (wanted_type != void_t && original_type == void_t) {
+		semanticError("Can't cast void argument to non void argument");
+	}
+}
+
